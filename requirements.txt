@@ -1,5 +1,8 @@
-streamlit
+streamlit>=1.20
 pdfplumber
 python-docx
 python-pptx
 pyspellchecker
+pandas
+openpyxl
+python-dateutil
