@@ -1,317 +1,323 @@
 # app.py
 import streamlit as st
-import re
-import io
-import os
+import os, io, re, csv
+from datetime import datetime
 import pandas as pd
 import pdfplumber
 from docx import Document
 from pptx import Presentation
-from docx.shared import RGBColor
 from spellchecker import SpellChecker
-from datetime import datetime
 
-# ---------------------------
-# Config / Paths
-# ---------------------------
+# ------------------ Config paths ------------------
 BASE_DIR = os.path.dirname(__file__)
 WORDLIST_DIR = os.path.join(BASE_DIR, "wordlists")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(WORDLIST_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
 ID_WORDLIST = os.path.join(WORDLIST_DIR, "id_wordlist.txt")
 EN_WORDLIST = os.path.join(WORDLIST_DIR, "en_wordlist.txt")
 ALLOWED_WORDS = os.path.join(WORDLIST_DIR, "allowed_words.txt")
 
-# ---------------------------
-# Utility: load wordlists
-# ---------------------------
+UNKNOWN_CSV = os.path.join(DATA_DIR, "unknown_words.csv")
+TYPO_LOG_CSV = os.path.join(DATA_DIR, "typo_log.csv")
+
+# ------------------ Helpers: load wordlists ------------------
 def load_wordset(path):
     s = set()
-    if not os.path.exists(path):
-        return s
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            w = line.strip()
-            if w:
-                s.add(w.lower())
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                w = line.strip()
+                if w:
+                    s.add(w.lower())
     return s
 
-ID_WORDS = load_wordset(ID_WORDLIST)     # besar: bahasa Indonesia
-EN_WORDS = load_wordset(EN_WORDLIST)     # besar: english
-ALLOWED = load_wordset(ALLOWED_WORDS)    # pengecualian BPS (kecamatan, istilah)
+ID_WORDS = load_wordset(ID_WORDLIST)
+EN_WORDS = load_wordset(EN_WORDLIST)
+ALLOWED = load_wordset(ALLOWED_WORDS)
 
-# fallback spellchecker (uses english by default; we set language=None and load id words)
-spell_id = SpellChecker(language=None)
-# add id words to spellchecker frequency so unknown() works better
+# fallback spellchecker
+spell = SpellChecker(language=None)
 for w in ID_WORDS:
-    spell_id.word_frequency.add(w)
+    spell.word_frequency.add(w)
+# (optional) add allowed words so they are not marked misspelled
+for w in ALLOWED:
+    spell.word_frequency.add(w)
 
-# ---------------------------
-# Extraction functions
-# ---------------------------
+# ------------------ Extraction functions ------------------
 def extract_docx(file):
     doc = Document(file)
-    paragraphs = [p.text for p in doc.paragraphs]
-    return paragraphs
+    return [p.text for p in doc.paragraphs if p.text.strip()]
 
 def extract_pdf(file):
-    paragraphs = []
+    paras = []
     with pdfplumber.open(file) as pdf:
         for page in pdf.pages:
             txt = page.extract_text()
             if txt:
-                # split to paragraphs by double newline OR keep line by line depending on layout
-                ps = [p.strip() for p in txt.split("\n\n") if p.strip()]
-                if not ps:
-                    # fallback: line by line
-                    ps = [ln.strip() for ln in txt.split("\n") if ln.strip()]
-                paragraphs.extend(ps)
-    return paragraphs
+                # split by double newline to approximate paragraphs
+                parts = [p.strip() for p in txt.split("\n\n") if p.strip()]
+                if parts:
+                    paras.extend(parts)
+                else:
+                    # fallback line by line
+                    paras.extend([ln.strip() for ln in txt.split("\n") if ln.strip()])
+    return paras
 
 def extract_pptx(file):
     prs = Presentation(file)
-    texts = []
+    paras = []
     for slide in prs.slides:
-        slide_text = []
+        lines = []
         for shape in slide.shapes:
             if hasattr(shape, "text"):
-                # split shape text to lines
-                slide_text.extend([ln.strip() for ln in shape.text.split("\n") if ln.strip()])
-        if slide_text:
-            texts.append(" ".join(slide_text))
-    return texts
+                lines.extend([ln.strip() for ln in shape.text.split("\n") if ln.strip()])
+        if lines:
+            paras.append(" ".join(lines))
+    return paras
 
 def extract_txt(file):
     txt = file.read().decode("utf-8", errors="ignore")
-    # split by double newline or single
-    paras = [p.strip() for p in txt.split("\n\n") if p.strip()]
-    if not paras:
-        paras = [p.strip() for p in txt.split("\n") if p.strip()]
-    return paras
+    parts = [p.strip() for p in txt.split("\n\n") if p.strip()]
+    return parts if parts else [p.strip() for p in txt.split("\n") if p.strip()]
 
-# ---------------------------
-# Normalization helpers
-# ---------------------------
-def normalize_whitespace(s):
-    return re.sub(r"\s+", " ", s).strip()
+# ------------------ Normalization & tokenization ------------------
+def normalize(s):
+    s = s.replace("\u200b"," ").replace("\xa0"," ").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
 
-# identify numeric patterns
-re_percent_comma = re.compile(r"\b\d+,\d+%")      # e.g. 12,5%
-re_percent_dot = re.compile(r"\b\d+\.\d+%")      # e.g. 12.5%
+def tokenize_words(text):
+    tokens = re.findall(r"\b[\w'-]+\b", text, flags=re.UNICODE)
+    return tokens
+
+# ------------------ Checkers ------------------
+re_percent_comma = re.compile(r"\b\d+,\d+%")
+re_percent_dot = re.compile(r"\b\d+\.\d+%")
 re_thousands_comma = re.compile(r"\b\d{1,3},\d{3}\b")
 re_thousands_dot = re.compile(r"\b\d{1,3}\.\d{3}\b")
 re_large_number = re.compile(r"\b\d{4,}\b")
 
-# ---------------------------
-# Checks (per paragraph)
-# ---------------------------
 def check_spelling(paragraph):
-    words = re.findall(r"\b[\w'-]+\b", paragraph, flags=re.UNICODE)
-    unknown = set()
-    for w in words:
-        lw = w.lower()
-        if lw in ALLOWED or lw in EN_WORDS:
+    tokens = tokenize_words(paragraph)
+    typos = []
+    unknowns = []
+    for t in tokens:
+        lw = t.lower()
+        if lw in ALLOWED or lw in ID_WORDS or lw in EN_WORDS:
             continue
-        # simple numbers skip
+        # skip pure numbers with punctuation
         if re.fullmatch(r"[\d\.,%]+", lw):
             continue
-        if lw not in ID_WORDS:
-            # check via spellchecker unknown
-            if lw not in spell_id:
-                unknown.add(w)
-    return sorted(unknown)
+        # if recognized by spell object -> not typo
+        if lw in spell:
+            # recognized by fallback, but not in ID_WORDS -> candidate unknown
+            if lw not in ID_WORDS:
+                unknowns.append(lw)
+            continue
+        # not recognized => likely typo
+        correction = spell.correction(lw) or ""
+        typos.append({"word": t, "suggest": correction})
+    # dedupe
+    typos_unique = {t["word"]:t for t in typos}.values()
+    unknowns = sorted(set(unknowns))
+    return list(typos_unique), unknowns
 
-def check_punctuation_spacing(paragraph):
+def check_punctuation(paragraph):
     issues = []
     if re.search(r"\s,", paragraph):
-        issues.append("Spasi sebelum koma (contoh: 'kata ,').")
+        issues.append("Spasi sebelum koma.")
     if re.search(r",\S", paragraph):
-        # but if comma followed immediately by ) or punctuation allow? still flag
-        issues.append("Tidak ada spasi setelah koma (contoh: 'kata, kata').")
+        # if comma directly followed by letter without space
+        issues.append("Tidak ada spasi setelah koma.")
     if re.search(r"\s\.", paragraph):
         issues.append("Spasi sebelum titik.")
     if re.search(r":\S", paragraph):
         issues.append("Tidak ada spasi setelah titik dua.")
-    if re.search(r"\(\s|\s\)", paragraph):
-        issues.append("Spasi di dalam/telah tanda kurung.")
     return issues
 
-def check_number_rules(paragraph):
+def check_numbers(paragraph):
     issues = []
-    # percent: check if comma used for decimal, follow BPS guideline (choose one)
-    # Suppose BPS style: desimal gunakan koma (12,5%), ribuan gunakan titik (1.234)
-    # We'll flag obvious mismatches: usage of comma in thousands (1,234) or dot in decimal (12.5%)
     if re_thousands_comma.search(paragraph):
-        issues.append("Kemungkinan pemisah ribuan memakai koma (seharusnya titik).")
+        issues.append("Pemisah ribuan menggunakan koma (mungkin salah).")
     if re_percent_dot.search(paragraph):
-        issues.append("Persen menggunakan titik desimal (pertimbangkan menggunakan koma sesuai pedoman).")
-    # check large number without separators
+        issues.append("Persen menggunakan titik desimal (cek pedoman).")
     for m in re_large_number.finditer(paragraph):
         num = m.group()
-        # if num not part of longer token e.g. 2023 is valid; we won't flag years (1900-2100)
         try:
             n = int(num)
             if 1900 <= n <= 2100:
                 continue
         except:
             pass
-        # if number length >=5 then it's likely needs thousand separator
         if len(num) >= 5:
             issues.append(f"Angka besar tanpa pemisah ribuan: {num}")
     return issues
 
-def detect_english_words(paragraph):
+def detect_english(paragraph):
     words = re.findall(r"\b[A-Za-z]{2,}\b", paragraph)
-    # return those English-looking words that match EN_WORDS and are not all-caps acronyms
-    found = []
-    for w in words:
-        lw = w.lower()
-        if lw in EN_WORDS and lw not in ALLOWED:
-            found.append(w)
-    return sorted(set(found))
+    found = [w for w in set(words) if w.lower() in EN_WORDS and w.lower() not in ALLOWED]
+    return sorted(found)
 
-# ---------------------------
-# Annotate paragraph with markdown highlights
-# ---------------------------
-def annotate_paragraph(paragraph, typos, pct_issues, number_issues, punct_issues, english_words):
-    s = paragraph
-    # highlight typos
-    for w in sorted(set(typos), key=lambda x: -len(x)):
-        # word-boundary replace, case-insensitive approximate by original casing search
-        s = re.sub(rf"\b{re.escape(w)}\b", f"**🟡{w}**", s, flags=re.IGNORECASE)
-    # highlight percent forms
-    for w in pct_issues:
-        s = s.replace(w, f"**🟡{w}**")
-    for w in number_issues:
-        s = s.replace(w, f"**🟡{w}**")
-    # punctuation issues are general; we'll note them at paragraph end
-    if punct_issues:
-        s = s + "  \n" + "  \n" + "**[Punctuation Warnings: " + '; '.join(punct_issues) + "]**"
-    # italicize english words
-    for w in sorted(set(english_words), key=lambda x: -len(x)):
-        s = re.sub(rf"\b{re.escape(w)}\b", f"*{w}*", s)
-    return s
+# ------------------ CSV helpers ------------------
+def append_unknowns(csv_path, rows):
+    # rows: list of dict {word, frequency, first_seen_doc, context}
+    if not rows:
+        return
+    # load existing
+    existing = {}
+    if os.path.exists(csv_path):
+        df = pd.read_csv(csv_path)
+        for _, r in df.iterrows():
+            existing[r['word']] = r.to_dict()
+    # update counts
+    for r in rows:
+        w = r['word']
+        if w in existing:
+            existing[w]['frequency'] = int(existing[w]['frequency']) + int(r.get('frequency',1))
+        else:
+            existing[w] = {'word': w, 'frequency': int(r.get('frequency',1)), 'first_seen_doc': r.get('first_seen_doc',''), 'context': r.get('context','')}
+    # write back
+    df_out = pd.DataFrame(list(existing.values()))
+    df_out.to_csv(csv_path, index=False, encoding='utf-8')
 
-# ---------------------------
-# Generate Word docx with highlight (yellow) & italic English
-# ---------------------------
-def docx_from_paragraphs(paragraphs, results):
+def log_typo(csv_path, docname, para_index, typos):
+    # typos: list of dict {word,suggest}
+    if not typos:
+        return
+    rows = []
+    if os.path.exists(csv_path):
+        df_old = pd.read_csv(csv_path)
+        rows = df_old.to_dict('records')
+    for t in typos:
+        rows.append({"doc":docname, "paragraph_index":para_index, "word":t['word'], "suggest":t.get('suggest','')})
+    pd.DataFrame(rows).to_csv(csv_path, index=False, encoding='utf-8')
+
+# ------------------ DOCX annotate generator ------------------
+from docx import Document
+from docx.shared import RGBColor
+
+def generate_annotated_docx(paragraphs, results):
     doc = Document()
     for i, p in enumerate(paragraphs):
         para = doc.add_paragraph()
-        tokens = re.split(r"(\s+)", p)  # keep whitespace
-        # tokens are words and spaces; we'll check token content for matches
+        tokens = re.split(r"(\s+)", p)  # preserve spaces
+        res = results.get(i, {})
+        typos = set([t['word'] for t in res.get('typos',[])])
+        unknowns = set(res.get('unknowns',[]))
+        pct = set(res.get('pct',[]))
+        numbers = set(res.get('numbers',[]))
+        eng = set(res.get('english',[]))
+
         for t in tokens:
             run = para.add_run(t)
-            # check if this token contains a typo exactly (ignore space tokens)
-            txt_clean = re.sub(r"\s+", "", t)
-            if not txt_clean:
+            clean = re.sub(r"[^\w%.,]", "", t).lower()
+            if t.strip() == "":
                 continue
-            lw = re.sub(r"[^\w%.,]", "", txt_clean).lower()
-            # highlight if flagged in results for this paragraph
-            res = results.get(i, {})
-            if txt_clean in res.get("typos", []) or txt_clean in res.get("pct", []) or txt_clean in res.get("numbers", []):
-                # highlight yellow (using highlight_color property if available)
+            if t.strip() in typos or clean in typos or t.strip() in pct or clean in numbers:
                 try:
-                    run.font.highlight_color = 7  # 7 == yellow in python-docx
-                except Exception:
-                    # as fallback, set font color red
-                    run.font.color.rgb = RGBColor(255, 0, 0)
-            # italicize english words
-            if re.fullmatch(r"[A-Za-z]{2,}", txt_clean) and txt_clean.lower() in EN_WORDS:
+                    run.font.highlight_color = 7  # yellow highlight
+                except:
+                    run.font.color.rgb = RGBColor(255,0,0)
+            if clean in eng:
                 run.italic = True
     return doc
 
-# ---------------------------
-# Main Streamlit app
-# ---------------------------
+# ------------------ Streamlit UI ------------------
 st.set_page_config(page_title="StatPub Checker (BPS Sidoarjo)", layout="wide")
-st.title("StatPub Checker — Tools Pengecekan Publikasi (BPS Sidoarjo)")
+st.title("StatPub Checker — (Final B)")
 
-st.markdown("""
-Aplikasi ini melakukan pemeriksaan kualitas teks publikasi: ejaan Bahasa Indonesia, tanda baca, format angka, dan deteksi istilah bahasa Inggris (italic).  
-Upload file (PDF/DOCX/PPTX/TXT), klik **Run all checks**, lalu unduh laporan / Word hasil anotasi.
-""")
+st.write("Upload dokumen (.pdf/.docx/.pptx/.txt). Aplikasi akan mengekstrak teks, melakukan spell-check, cek angka & tanda baca, menyimpan kata baru ke `data/unknown_words.csv` (bukan typo).")
 
-uploaded = st.file_uploader("Upload dokumen (pdf/docx/pptx/txt)", type=["pdf", "docx", "pptx", "txt"])
-
+uploaded = st.file_uploader("Upload dokumen", type=["pdf","docx","pptx","txt"])
 if uploaded:
-    # extract paragraphs
+    st.info(f"File: {uploaded.name}")
     ext = uploaded.name.lower().split(".")[-1]
     if ext == "pdf":
-        paragraphs = extract_pdf(uploaded)
+        paras = extract_pdf(uploaded)
     elif ext == "docx":
-        paragraphs = extract_docx(uploaded)
+        paras = extract_docx(uploaded)
     elif ext == "pptx":
-        paragraphs = extract_pptx(uploaded)
+        paras = extract_pptx(uploaded)
     elif ext == "txt":
-        paragraphs = extract_txt(uploaded)
+        paras = extract_txt(uploaded)
     else:
-        st.error("Format file tidak didukung.")
-        st.stop()
+        st.error("Format tidak didukung."); st.stop()
 
-    # show preview
-    st.subheader("Preview (beberapa paragraf pertama)")
-    for i, p in enumerate(paragraphs[:6]):
-        st.markdown(f"**Paragraf {i+1}:** {normalize_whitespace(p[:500])}")
+    st.subheader("Preview (paragraf pertama)")
+    for i,p in enumerate(paras[:5]):
+        st.markdown(f"**Par {i+1}:** {normalize(p)[:400]}")
 
     if st.button("🔍 Run all checks"):
-        st.info("Sedang memproses...")
-
-        results = {}   # index -> dict{typos, pct, numbers, punct, english}
-        annotated_md = []
-
-        for i, p in enumerate(paragraphs):
-            p_norm = normalize_whitespace(p)
-            typos = check_spelling(p_norm)
-            punct = check_punctuation_spacing(p_norm)
+        st.info("Memproses dokumen...")
+        results = {}
+        unknown_rows = []
+        for i,p in enumerate(paras):
+            p_norm = normalize(p)
+            typos, unknowns = check_spelling(p_norm)
+            punct = check_punctuation(p_norm)
             pct = re_percent_comma.findall(p_norm) + re_percent_dot.findall(p_norm)
             numbers = re_thousands_comma.findall(p_norm) + re_thousands_dot.findall(p_norm) + re_large_number.findall(p_norm)
-            eng = detect_english_words(p_norm)
-            results[i] = {"typos": typos, "pct": pct, "numbers": numbers, "punct": punct, "english": eng}
-            annotated = annotate_paragraph(p_norm, typos, pct, numbers, punct, eng)
-            annotated_md.append((i, annotated))
+            eng = detect_english(p_norm)
+            results[i] = {"typos": typos, "unknowns": unknowns, "punct": punct, "pct": pct, "numbers": numbers, "english": eng}
+            # append unknowns to rows for CSV (word-level frequency)
+            for u in unknowns:
+                unknown_rows.append({"word":u, "frequency":1, "first_seen_doc":uploaded.name, "context": p_norm[:200]})
+            # log typos
+            if typos:
+                log_typo(TYPO_LOG_CSV, uploaded.name, i, typos)
 
-        # show summary counts
-        total_typos = sum(len(v["typos"]) for v in results.values())
-        total_pct = sum(len(v["pct"]) for v in results.values())
-        total_numbers = sum(len(v["numbers"]) for v in results.values())
-        st.success(f"Proses selesai — {total_typos} typo, {total_pct} percent-format issues, {total_numbers} numeric issues ditemukan.")
+        # aggregate unknown_rows frequencies before append
+        df_unknown = pd.DataFrame(unknown_rows)
+        if not df_unknown.empty:
+            agg = df_unknown.groupby('word', as_index=False).agg({'frequency':'sum','first_seen_doc':'first','context':'first'})
+            agg_rows = agg.to_dict('records')
+            append_unknowns(UNKNOWN_CSV, agg_rows)
 
-        # show annotated preview
-        st.subheader("Annotated Preview")
-        for i, ann in annotated_md[:8]:
-            st.markdown(f"**Paragraf {i+1}:**")
-            st.markdown(ann)
-
-        # prepare dataframe report
+        # Prepare report dataframe
         rows = []
-        for i, v in results.items():
-            if v["typos"] or v["pct"] or v["numbers"] or v["punct"] or v["english"]:
+        for i,v in results.items():
+            if v['typos'] or v['unknowns'] or v['pct'] or v['numbers'] or v['punct'] or v['english']:
                 rows.append({
                     "paragraph_index": i,
-                    "text_preview": normalize_whitespace(paragraphs[i])[:200],
-                    "typos": "; ".join(v["typos"]),
-                    "pct_issues": "; ".join(v["pct"]),
-                    "number_issues": "; ".join(v["numbers"]),
-                    "punctuation_issues": "; ".join(v["punct"]),
-                    "english_terms": "; ".join(v["english"])
+                    "preview": normalize(paras[i])[:200],
+                    "typos": "; ".join([t['word'] for t in v['typos']]) if v['typos'] else "",
+                    "unknowns": "; ".join(v['unknowns']) if v['unknowns'] else "",
+                    "pct": "; ".join(v['pct']) if v['pct'] else "",
+                    "numbers": "; ".join(v['numbers']) if v['numbers'] else "",
+                    "punct": "; ".join(v['punct']) if v['punct'] else "",
+                    "english": "; ".join(v['english']) if v['english'] else ""
                 })
         df_report = pd.DataFrame(rows)
-        st.subheader("Detailed Report")
-        st.dataframe(df_report)
 
-        # download report csv/xlsx
-        csv = df_report.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Download CSV Report", csv, file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.csv", mime="text/csv")
-        # xlsx
+        st.success("Selesai! Lihat ringkasan di bawah.")
+        st.subheader("Annotated Preview (paragraf sample)")
+        for i in list(results.keys())[:6]:
+            ann = paras[i]
+            st.markdown(f"**Par {i+1}:** {normalize(ann)[:500]}")
+            if results[i]['typos']:
+                st.write("Typos: ", [t['word'] for t in results[i]['typos']])
+            if results[i]['unknowns']:
+                st.write("Kata baru: ", results[i]['unknowns'])
+            if results[i]['english']:
+                st.write("English terms: ", results[i]['english'])
+            if results[i]['pct'] or results[i]['numbers'] or results[i]['punct']:
+                st.write("Numeric/Punct issues: ", results[i]['pct'] + results[i]['numbers'] + results[i]['punct'])
+
+        # downloads
+        csv_bytes = df_report.to_csv(index=False).encode('utf-8')
+        st.download_button("⬇️ Download CSV Report", csv_bytes, file_name=f"report_{uploaded.name}_{datetime.now().strftime('%Y%m%d')}.csv", mime="text/csv")
+        # excel
         to_xlsx = io.BytesIO()
         with pd.ExcelWriter(to_xlsx, engine="openpyxl") as writer:
             df_report.to_excel(writer, index=False, sheet_name="report")
         to_xlsx.seek(0)
-        st.download_button("⬇️ Download Excel Report", to_xlsx, file_name=f"report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx")
+        st.download_button("⬇️ Download Excel Report", to_xlsx, file_name=f"report_{uploaded.name}_{datetime.now().strftime('%Y%m%d')}.xlsx")
 
-        # generate annotated docx
-        docx_doc = docx_from_paragraphs(paragraphs, results)
-        to_docx = io.BytesIO()
-        docx_doc.save(to_docx)
-        to_docx.seek(0)
-        st.download_button("⬇️ Download Annotated DOCX", to_docx, file_name=f"annotated_{os.path.splitext(uploaded.name)[0]}_{datetime.now().strftime('%Y%m%d')}.docx")
+        # docx annotated
+        docx_obj = generate_annotated_docx(paras, results)
+        buf = io.BytesIO()
+        docx_obj.save(buf)
+        buf.seek(0)
+        st.download_button("⬇️ Download Annotated DOCX", buf, file_name=f"annotated_{os.path.splitext(uploaded.name)[0]}_{datetime.now().strftime('%Y%m%d')}.docx")
