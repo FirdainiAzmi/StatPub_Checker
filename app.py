@@ -12,7 +12,7 @@ def load_wordlists():
     with open("wordlists/id_wordlist.txt", "r", encoding="utf-8") as f:
         indo_words = set(f.read().splitlines())
 
-    with open("wordlist/englist.txt", "r", encoding="utf-8") as f:
+    with open("wordlists/englist.txt", "r", encoding="utf-8") as f:
          eng_words = set(f.read().splitlines())
 
     return indo_words, eng_words
@@ -141,6 +141,7 @@ if uploaded:
         st.warning(wrong_percent)
     else:
         st.success("Format persentase sudah benar (contoh benar: 12.45%).")
+
 
 
 
