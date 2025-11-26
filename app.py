@@ -9,16 +9,16 @@ from docx import Document
 # ======================
 @st.cache_resource
 def load_wordlists():
-    with open("wordlist/indlist.txt", "r", encoding="utf-8") as f:
+    with open("wordlist/id_wordlist.txt", "r", encoding="utf-8") as f:
         indo_words = set(f.read().splitlines())
 
-    with open("wordlist/englist.txt", "r", encoding="utf-8") as f:
-        eng_words = set(f.read().splitlines())
+    # with open("wordlist/englist.txt", "r", encoding="utf-8") as f:
+    #     eng_words = set(f.read().splitlines())
 
-    return indo_words, eng_words
+    return indo_words
 
 
-indo_dict, eng_dict = load_wordlists()
+indo_dict= load_wordlists()
 spell_en = SpellChecker(language='en')
 
 
@@ -141,3 +141,4 @@ if uploaded:
         st.warning(wrong_percent)
     else:
         st.success("Format persentase sudah benar (contoh benar: 12.45%).")
+
