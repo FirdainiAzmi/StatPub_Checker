@@ -12,13 +12,13 @@ def load_wordlists():
     with open("wordlists/id_wordlist.txt", "r", encoding="utf-8") as f:
         indo_words = set(f.read().splitlines())
 
-    # with open("wordlist/englist.txt", "r", encoding="utf-8") as f:
-    #     eng_words = set(f.read().splitlines())
+    with open("wordlist/englist.txt", "r", encoding="utf-8") as f:
+         eng_words = set(f.read().splitlines())
 
-    return indo_words
+    return indo_words, eng_words
 
 
-indo_dict= load_wordlists()
+indo_dict, eng_dict= load_wordlists()
 spell_en = SpellChecker(language='en')
 
 
@@ -141,5 +141,6 @@ if uploaded:
         st.warning(wrong_percent)
     else:
         st.success("Format persentase sudah benar (contoh benar: 12.45%).")
+
 
 
