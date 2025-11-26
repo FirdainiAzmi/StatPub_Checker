@@ -9,4 +9,6 @@ python-dateutil
 langdetect
 PyMuPDF
 kbbi
+PyPDF2
+
 
