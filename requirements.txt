@@ -6,3 +6,7 @@ pyspellchecker
 pandas
 openpyxl
 python-dateutil
+langdetect
+PyMuPDF
+kbbi
+
