@@ -1,203 +1,97 @@
 import streamlit as st
+import docx
 import re
-from spellchecker import SpellChecker
-import PyPDF2
-from docx import Document
-from docx.oxml.ns import qn
-from docx.oxml import OxmlElement
+from io import BytesIO
+from PyPDF2 import PdfReader
 
-# ======================
+# -----------------------------
 # LOAD WORDLIST
-# ======================
-@st.cache_resource
-def load_wordlists():
-    with open("wordlists/id_wordlist.txt", "r", encoding="utf-8") as f:
-        indo_words = set(f.read().splitlines())
+# -----------------------------
+def load_wordlist(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return set([w.strip().lower() for w in f.readlines() if w.strip()])
+    except:
+        return set()
 
-    with open("wordlists/eng_wordlist.txt", "r", encoding="utf-8") as f:
-        eng_words = set(f.read().splitlines())
+ENG_LIST = load_wordlist("wordlist/eng_list.txt")
+IND_LIST = load_wordlist("wordlist/ind_list.txt")
 
-    return indo_words, eng_words
-
-
-indo_dict, eng_dict = load_wordlists()
-spell_en = SpellChecker(language='en')
-
-
-# ======================
-# FILE READER
-# ======================
-def read_pdf(file):
-    reader = PyPDF2.PdfReader(file)
+# -----------------------------
+# EXTRACT TEXT
+# -----------------------------
+def extract_from_pdf(upload):
+    reader = PdfReader(upload)
     text = ""
-    for p in reader.pages:
-        if p.extract_text():
-            text += p.extract_text() + " "
+    for page in reader.pages:
+        extracted = page.extract_text()
+        if extracted:
+            text += extracted + "\n"
     return text
 
-
-def read_docx(file):
-    doc = Document(file)
-    text = " ".join([p.text for p in doc.paragraphs])
+def extract_from_docx(upload):
+    doc = docx.Document(upload)
+    text = ""
+    for para in doc.paragraphs:
+        text += para.text + "\n"
     return text
 
+# -----------------------------
+# HIGHLIGHT WORDS NOT IN WORDLIST
+# -----------------------------
+def highlight_text(text, lang):
 
-# ======================
-# DETEKSI TYPO
-# ======================
-def detect_typo(text):
-    words = re.findall(r'\b[a-zA-Z]+\b', text)
-    typos = set()
+    if lang == "English":
+        wordlist = ENG_LIST
+    else:
+        wordlist = IND_LIST
 
-    for w in words:
-        wl = w.lower()
+    def mark(match):
+        word = match.group(0)
+        if word.lower() not in wordlist:
+            return f"🔶**{word}**"     # highlight
+        return word
 
-        if wl in indo_dict:  # kata Indonesia benar
-            continue
+    # only highlight words, not remove or reorder anything
+    processed = re.sub(r"\b[A-Za-zÀ-ÿ']+\b", mark, text)
+    return processed
 
-        if wl in eng_dict:  # kata English benar
-            continue
+# -----------------------------
+# STREAMLIT APP
+# -----------------------------
+st.set_page_config(page_title="Wordlist Checker", layout="wide")
 
-        if wl in spell_en:  # dicek SpellChecker EN
-            continue
+st.title("📘 Wordlist Checker (Indonesia / English)")
+st.write("Unggah dokumen dan sistem akan menandai kata yang tidak ada di wordlist Anda. Struktur dokumen tidak akan diubah.")
 
-        typos.add(w)
-
-    return sorted(list(typos))
-
-
-# ======================
-# DETEKSI KATA INGGRIS (italic)
-# ======================
-def detect_english_words(text):
-    words = re.findall(r'\b[a-zA-Z]+\b', text)
-    english_found = []
-
-    for w in words:
-        wl = w.lower()
-        if wl in eng_dict or wl in spell_en:
-            english_found.append(w)
-
-    return sorted(set(english_found))
-
-
-# ======================
-# DETEKSI FORMAT PERSENTASE BENAR
-# ======================
-def detect_wrong_percentage(text):
-    wrong = []
-
-    # Format benar: 12.34%
-    pattern_correct = r'\b\d+\.\d+%\b'
-    pattern_any = r'\b\d+[%]\b|\b\d+[,]\d+[%]\b'
-
-    all_found = re.findall(pattern_any, text)
-    correct = re.findall(pattern_correct, text)
-
-    for item in all_found:
-        if item not in correct:
-            wrong.append(item)
-
-    return sorted(set(wrong))
-
-
-# ======================
-# CREATE HIGHLIGHTED DOCUMENT
-# ======================
-def add_highlight(run, color_word):
-    highlight = OxmlElement("w:highlight")
-    highlight.set(qn("w:val"), color_word)  # red, yellow, cyan
-    run._r.get_or_add_rPr().append(highlight)
-
-
-def create_highlighted_doc(original_text, typos, eng_words, wrong_percent):
-    doc = Document()
-
-    # Pisahkan per baris/paragraf
-    paragraphs = original_text.split("\n")
-
-    for para_text in paragraphs:
-        para = doc.add_paragraph()
-
-        # Pisahkan kata dengan mempertahankan spasi original
-        tokens = re.findall(r'\S+|\s+', para_text)
-
-        for token in tokens:
-            if token.isspace():
-                # tambahkan spasi apa adanya
-                para.add_run(token)
-                continue
-
-            clean = re.sub(r"[^\w%.,-]", "", token)
-            run = para.add_run(token)
-
-            # Highlight kategori tertentu
-            if clean in typos:
-                add_highlight(run, "red")
-            elif clean in eng_words:
-                add_highlight(run, "yellow")
-            elif clean in wrong_percent:
-                add_highlight(run, "cyan")
-
-    return doc
-
-
-# ======================
-# STREAMLIT UI
-# ======================
-st.title("📘 Checker Publikasi BPS – Typo, English & Persentase")
-st.write("Unggah PDF atau Word untuk dianalisis.")
-
-uploaded = st.file_uploader("Upload file", type=["pdf", "docx"])
+uploaded = st.file_uploader("Upload PDF atau DOCX", type=["pdf", "docx"])
+language = st.selectbox("Pilih Bahasa Dokumen", ["Indonesia", "English"])
 
 if uploaded:
+    # Extract text depending on file type
     if uploaded.type == "application/pdf":
-        text = read_pdf(uploaded)
+        raw_text = extract_from_pdf(uploaded)
     else:
-        text = read_docx(uploaded)
+        raw_text = extract_from_docx(uploaded)
 
-    st.subheader("📄 Hasil Analisis")
+    st.subheader("📄 Teks Asli (Tanpa Diubah)")
+    st.code(raw_text, language="text")
 
-    # TYPO
-    typos = detect_typo(text)
-    st.write("### ❌ Kemungkinan Typo:")
-    if typos:
-        st.error(typos)
-    else:
-        st.success("Tidak ditemukan typo.")
+    # Process with highlight
+    highlighted = highlight_text(raw_text, language)
 
-    # English words
-    eng_words = detect_english_words(text)
-    st.write("### 🔤 Kata Bahasa Inggris (seharusnya italic):")
-    if eng_words:
-        st.warning(eng_words)
-    else:
-        st.success("Tidak ada kata Bahasa Inggris.")
+    st.subheader("✨ Teks dengan Highlight (Struktur 100% Sama)")
+    st.markdown(highlighted)
 
-    # Percentage wrong
-    wrong_percent = detect_wrong_percentage(text)
-    st.write("### % Format Persentase Salah:")
-    if wrong_percent:
-        st.warning(wrong_percent)
-    else:
-        st.success("Format persentase sudah benar (contoh benar: 12.45%).")
+    # Optional: Download result
+    output = highlighted
+    buffer = BytesIO()
+    buffer.write(output.encode("utf-8"))
+    buffer.seek(0)
 
-    # ======================
-    # DOWNLOAD DOCUMENT
-    # ======================
-    st.write("---")
-    st.write("### 📄 Download Dokumen Hasil Highlight")
-
-    if st.button("Generate DOCX"):
-        highlighted_doc = create_highlighted_doc(text, typos, eng_words, wrong_percent)
-        output_path = "hasil_cek_publikasi.docx"
-        highlighted_doc.save(output_path)
-
-        with open(output_path, "rb") as f:
-            st.download_button(
-                label="⬇ Download Hasil (DOCX)",
-                data=f,
-                file_name="hasil_cek_publikasi.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-            )
-
+    st.download_button(
+        "⬇️ Download Hasil (TXT)",
+        buffer,
+        file_name="highlighted_result.txt",
+        mime="text/plain"
+    )
