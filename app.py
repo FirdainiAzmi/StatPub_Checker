@@ -1,167 +1,143 @@
 import streamlit as st
-from docx import Document
 import re
 from spellchecker import SpellChecker
-from langdetect import detect
-import fitz  # PyMuPDF untuk PDF
-from kbbi import KBBI
-import tempfile
+import PyPDF2
+from docx import Document
+
+# ======================
+# LOAD WORDLIST
+# ======================
+@st.cache_resource
+def load_wordlists():
+    with open("wordlist/indlist.txt", "r", encoding="utf-8") as f:
+        indo_words = set(f.read().splitlines())
+
+    with open("wordlist/englist.txt", "r", encoding="utf-8") as f:
+        eng_words = set(f.read().splitlines())
+
+    return indo_words, eng_words
 
 
-# =====================================================
-# Ekstraksi teks dari DOCX
-# =====================================================
-def extract_text_docx(file):
-    doc = Document(file)
-    all_text = []
-
-    for para in doc.paragraphs:
-        all_text.append(para.text)
-
-    return "\n".join(all_text), doc
+indo_dict, eng_dict = load_wordlists()
+spell_en = SpellChecker(language='en')
 
 
-# =====================================================
-# Ekstraksi teks dari PDF
-# =====================================================
-def extract_text_pdf(file):
-    pdf = fitz.open(stream=file.read(), filetype="pdf")
+# ======================
+# FILE READER
+# ======================
+def read_pdf(file):
+    reader = PyPDF2.PdfReader(file)
     text = ""
-
-    for page in pdf:
-        text += page.get_text()
-
-    return text, None
+    for p in reader.pages:
+        text += p.extract_text() + " "
+    return text
 
 
-# =====================================================
-# Cek Typo
-# =====================================================
-def check_typo(text):
-    spell_en = SpellChecker(language='en')   # hanya untuk English
+def read_docx(file):
+    doc = Document(file)
+    text = " ".join([p.text for p in doc.paragraphs])
+    return text
+
+
+# ======================
+# DETEKSI TYPO
+# ======================
+def detect_typo(text):
     words = re.findall(r'\b[a-zA-Z]+\b', text)
-    errors = []
+    typos = set()
 
-    for word in words:
-        w = word.lower()
+    for w in words:
+        wl = w.lower()
 
-        # 1. CEK BAHASA INDONESIA VIA KBBI
-        try:
-            _ = KBBI(w)
-            continue  # kata Indonesia benar
-        except:
-            pass
+        # Cek dictionary Indonesia
+        if wl in indo_dict:
+            continue
 
-        # 2. CEK APAKAH INI KATA INGGRIS?
-        try:
-            if detect(w) == "en":
-                if w not in spell_en:  # jika salah
-                    errors.append(word)
-                continue
-        except:
-            pass
+        # Cek dictionary English
+        if wl in eng_dict:
+            continue
 
-        # 3. TIDAK ADA DI KBBI & BUKAN ENGLISH = kemungkinan TYPO
-        errors.append(word)
+        # Cek SpellChecker EN
+        if wl in spell_en:  
+            continue
 
-    return list(set(errors))
+        typos.add(w)
+
+    return sorted(list(typos))
 
 
+# ======================
+# DETEKSI KATA INGGRIS (untuk italic)
+# ======================
+def detect_english_words(text):
+    words = re.findall(r'\b[a-zA-Z]+\b', text)
+    english_found = []
 
-# =====================================================
-# Cek Format Persen
-# =====================================================
-def check_percentage(text):
-    found = re.findall(r'[\d\.,]+%', text)
-    errors = []
+    for w in words:
+        wl = w.lower()
+        if wl in eng_dict or wl in spell_en:
+            english_found.append(w)
 
-    for p in found:
-        if not re.match(r'^\d+\.\d+%$', p):
-            errors.append(p)
-
-    return errors
-
-
-# =====================================================
-# Deteksi apakah kata English
-# =====================================================
-def is_english(word):
-    try:
-        lang = detect(word)
-        return lang == "en"
-    except:
-        return False
+    return sorted(set(english_found))
 
 
-# =====================================================
-# Cek Italic kata Inggris (DOCX only)
-# =====================================================
-def check_italic(doc):
-    if doc is None:
-        return []
+# ======================
+# DETEKSI FORMAT PERSENTASE BENAR
+# ======================
+def detect_wrong_percentage(text):
+    wrong = []
 
-    errors = []
+    # Format benar: 12.34%
+    pattern_correct = r'\b\d+\.\d+%\b'
+    pattern_any = r'\b\d+[%]\b|\b\d+[,]\d+[%]\b'  # menangkap angka tanpa titik
 
-    for i, para in enumerate(doc.paragraphs):
-        for run in para.runs:
-            words = run.text.split()
-            for w in words:
-                if is_english(w) and not run.italic:
-                    errors.append(f"Kata '{w}' di paragraf {i+1} seharusnya *italic*")
+    all_found = re.findall(pattern_any, text)
+    correct = re.findall(pattern_correct, text)
 
-    return errors
+    for item in all_found:
+        if item not in correct:
+            wrong.append(item)
+
+    return sorted(set(wrong))
 
 
-# =====================================================
+# ======================
 # STREAMLIT UI
-# =====================================================
-st.set_page_config(page_title="BPS Publication Checker", layout="wide")
+# ======================
+st.title("📘 Checker Publikasi BPS – Typo, English Italic, & Persentase")
+st.write("Unggah PDF atau Word untuk dianalisis.")
 
-st.title("📘 BPS Publication Checker")
-st.write("Aplikasi ini membantu mendeteksi typo, format persen, dan italic istilah bahasa Inggris pada publikasi BPS.")
+uploaded = st.file_uploader("Upload file", type=["pdf", "docx"])
 
-uploaded_file = st.file_uploader("Upload dokumen (.pdf atau .docx)", type=["pdf", "docx"])
-
-if uploaded_file is not None:
-    st.success("File berhasil diupload!")
-
-    if uploaded_file.name.endswith(".docx"):
-        text, doc = extract_text_docx(uploaded_file)
+if uploaded:
+    # Baca file
+    if uploaded.type == "application/pdf":
+        text = read_pdf(uploaded)
     else:
-        text, doc = extract_text_pdf(uploaded_file)
+        text = read_docx(uploaded)
 
-    st.subheader("🔍 Proses Pengecekan")
-    with st.spinner("Sedang memproses dokumen..."):
-        typo_errors = check_typo(text)
-        percent_errors = check_percentage(text)
-        italic_errors = check_italic(doc)
-
-    st.subheader("📌 Hasil Pemeriksaan")
-
-    # Typo
-    st.write("### 1. Typo")
-    if typo_errors:
-        st.error(f"Ditemukan {len(typo_errors)} typo:")
-        st.write(typo_errors)
+    st.subheader("📄 Hasil Analisis")
+    
+    # TYPO
+    typos = detect_typo(text)
+    st.write("### ❌ Kemungkinan Typo:")
+    if typos:
+        st.error(typos)
     else:
-        st.success("Tidak ada typo ditemukan ✔️")
+        st.success("Tidak ditemukan typo.")
 
-    # Persen
-    st.write("### 2. Format Persen (wajib 12.34%)")
-    if percent_errors:
-        st.error(f"Format persen salah ditemukan:")
-        st.write(percent_errors)
+    # English words (for italic)
+    eng_words = detect_english_words(text)
+    st.write("### 🔤 Kata Bahasa Inggris (seharusnya italic):")
+    if eng_words:
+        st.warning(eng_words)
     else:
-        st.success("Format persen sudah benar ✔️")
+        st.success("Tidak ada kata Bahasa Inggris.")
 
-    # Italic
-    st.write("### 3. Kata Inggris Tidak Italic")
-    if doc is None:
-        st.info("Italic tidak dapat dicek untuk PDF.")
+    # Percentage wrong format
+    wrong_percent = detect_wrong_percentage(text)
+    st.write("### % Format Persentase Salah:")
+    if wrong_percent:
+        st.warning(wrong_percent)
     else:
-        if italic_errors:
-            st.error("Ditemukan kata Inggris yang seharusnya italic:")
-            st.write(italic_errors)
-        else:
-            st.success("Tidak ada kesalahan italic ✔️")
-
+        st.success("Format persentase sudah benar (contoh benar: 12.45%).")
