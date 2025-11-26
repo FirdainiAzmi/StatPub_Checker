@@ -112,20 +112,32 @@ def add_highlight(run, color_word):
 
 def create_highlighted_doc(original_text, typos, eng_words, wrong_percent):
     doc = Document()
-    para = doc.add_paragraph()
 
-    words = original_text.split()
+    # Pisahkan per baris/paragraf
+    paragraphs = original_text.split("\n")
 
-    for w in words:
-        clean = re.sub(r"[^\w%.,-]", "", w)
-        run = para.add_run(w + " ")
+    for para_text in paragraphs:
+        para = doc.add_paragraph()
 
-        if clean in typos:
-            add_highlight(run, "red")
-        elif clean in eng_words:
-            add_highlight(run, "yellow")
-        elif clean in wrong_percent:
-            add_highlight(run, "cyan")
+        # Pisahkan kata dengan mempertahankan spasi original
+        tokens = re.findall(r'\S+|\s+', para_text)
+
+        for token in tokens:
+            if token.isspace():
+                # tambahkan spasi apa adanya
+                para.add_run(token)
+                continue
+
+            clean = re.sub(r"[^\w%.,-]", "", token)
+            run = para.add_run(token)
+
+            # Highlight kategori tertentu
+            if clean in typos:
+                add_highlight(run, "red")
+            elif clean in eng_words:
+                add_highlight(run, "yellow")
+            elif clean in wrong_percent:
+                add_highlight(run, "cyan")
 
     return doc
 
@@ -188,3 +200,4 @@ if uploaded:
                 file_name="hasil_cek_publikasi.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             )
+
