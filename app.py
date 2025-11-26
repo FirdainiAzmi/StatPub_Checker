@@ -38,25 +38,34 @@ def extract_text_pdf(file):
 # Cek Typo
 # =====================================================
 def check_typo(text):
-    spell = SpellChecker(language='id')
+    spell_en = SpellChecker(language='en')   # hanya untuk English
     words = re.findall(r'\b[a-zA-Z]+\b', text)
     errors = []
 
     for word in words:
         w = word.lower()
 
-        # cek KBBI
+        # 1. CEK BAHASA INDONESIA VIA KBBI
         try:
             _ = KBBI(w)
-            continue
+            continue  # kata Indonesia benar
         except:
             pass
 
-        # cek spellchecker
-        if w not in spell:
-            errors.append(word)
+        # 2. CEK APAKAH INI KATA INGGRIS?
+        try:
+            if detect(w) == "en":
+                if w not in spell_en:  # jika salah
+                    errors.append(word)
+                continue
+        except:
+            pass
+
+        # 3. TIDAK ADA DI KBBI & BUKAN ENGLISH = kemungkinan TYPO
+        errors.append(word)
 
     return list(set(errors))
+
 
 
 # =====================================================
@@ -155,3 +164,4 @@ if uploaded_file is not None:
             st.write(italic_errors)
         else:
             st.success("Tidak ada kesalahan italic ✔️")
+
